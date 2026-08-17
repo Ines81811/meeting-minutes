@@ -1,0 +1,13 @@
+backend/data/audio/*
+backend/data/transcripts/*
+backend/data/outputs/*
+!backend/data/audio/.gitkeep
+!backend/data/transcripts/.gitkeep
+!backend/data/outputs/.gitkeep
+backend/.env
+backend/logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/

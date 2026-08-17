@@ -1,0 +1,21 @@
+fastapi
+uvicorn[standard]
+python-multipart
+faster-whisper
+mutagen
+python-dotenv
+pyannote.audio
+python-docx
+google-genai
+
+# torch is a pyannote.audio dependency. Install it separately BEFORE this file
+# with the CPU-only index to avoid pulling the multi-GB CUDA build on a
+# machine without a GPU:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
+# System dependency: FFmpeg with shared DLLs (torchcodec needs the actual
+# libraries, not just the pip package). On Windows:
+#   winget install --id Gyan.FFmpeg.Shared -e
+# app/config.py auto-detects this winget install location; set FFMPEG_DLL_DIR
+# in .env if FFmpeg lives elsewhere.

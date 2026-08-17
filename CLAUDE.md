@@ -1,0 +1,145 @@
+# 逐字稿載入系統 — 專案記憶（CLAUDE.md）
+
+給未來 session／其他對話的你：這份專案照著 `逐字稿載入系統-規格書.md`（原始檔案在使用者的 Downloads 資料夾）第 10 節列出的 7 個開發步驟依序實作。這份文件記錄目前進度、關鍵技術決策，以及跟原規格書不同的地方（含原因），避免每次重新討論一遍。
+
+## 開發進度（對應規格書第 10 節）
+
+| # | 項目 | 狀態 |
+|---|---|---|
+| 1 | 音檔上傳 + faster-whisper 轉錄 | ✅ 完成 |
+| 2 | pyannote.audio + 時間戳對齊邏輯，產出完整 VERBATIM | ✅ 完成 |
+| 3 | VERBATIM 轉 docx 下載 | ✅ 完成 |
+| 4 | 串接 LLM API 產生 ACTION_ITEMS、SUMMARY，轉 docx 下載 | ✅ 完成（**改用 Gemini API，非規格書原訂的 Claude API**，見下方原因） |
+| 5 | 版本管理機制 | ✅ 完成 |
+| 6 | 歷史紀錄頁面 | ✅ 完成 |
+| 7 | Web 介面整體串接與測試 | ✅ 完成 |
+
+## 專案結構
+
+```
+會議記錄系統/
+├── CLAUDE.md                          # 本檔案
+├── .gitignore
+└── backend/
+    ├── .env                           # 密鑰與設定（不進版控）
+    ├── requirements.txt
+    ├── app/
+    │   ├── main.py                    # FastAPI app，掛載 router + 靜態頁
+    │   ├── config.py                  # 讀 .env、ffmpeg DLL 路徑偵測
+    │   ├── jobs.py                    # 記憶體中的 job 狀態（見下方限制）
+    │   ├── storage.py                 # 音檔/逐字稿/outputs 的檔案讀寫
+    │   ├── alignment.py               # STT segments × diarization turns 對齊
+    │   ├── audio_preprocess.py        # ffmpeg 轉成統一 16kHz mono WAV
+    │   ├── docx_export.py             # VERBATIM / ACTION_ITEMS / SUMMARY → docx
+    │   ├── llm.py                     # Gemini API 呼叫 + prompts
+    │   ├── stt/
+    │   │   ├── base.py                # STTEngine 抽象介面、Segment dataclass
+    │   │   └── faster_whisper_engine.py
+    │   ├── diarization/
+    │   │   ├── base.py                # DiarizationEngine 抽象介面、SpeakerTurn dataclass
+    │   │   └── pyannote_engine.py
+    │   └── api/
+    │       └── transcribe.py          # 所有 API 路由
+    ├── static/index.html              # 單頁前端（上傳/狀態輪詢/下載/版本列表）
+    └── data/
+        ├── audio/                     # 原始上傳音檔（uuid 命名）
+        ├── transcripts/               # 逐字稿 JSON（uuid 命名）
+        └── outputs/                   # ACTION_ITEMS/SUMMARY 產出，每版一個檔案
+```
+
+## 關鍵技術決策
+
+### STT：faster-whisper
+- 模型名稱、device、compute_type 都走 `.env`（`WHISPER_MODEL`/`WHISPER_DEVICE`/`WHISPER_COMPUTE_TYPE`），預設 `medium` / `cpu` / `int8`。
+- **這台開發機沒有 GPU**，先用 `medium` 驗證流程正確性，不用一開始就上 `large-v3`（規格書建議值）；之後要衝準確度或換到有 GPU 的機器時，只需要改 `.env`，不用動程式碼。
+- `STTEngine` 抽象介面在 `app/stt/base.py`，符合規格書 3.3 的「可替換架構」要求。
+
+### Diarization：pyannote.audio 4.0，非規格書原訂的 3.1
+- 規格書寫的 `pyannote/speaker-diarization-3.1` 已過時。目前 pyannote.audio 4.0 的開源本地版模型是 **`pyannote/speaker-diarization-community-1`**（CC-BY-4.0，免費、可本地跑，符合規格書「開源免費」精神）。
+- 需要 Hugging Face token（`.env` 的 `HF_TOKEN`），且該 token 對應帳號要先到 https://huggingface.co/pyannote/speaker-diarization-community-1 網頁上接受使用條款，否則下載模型會 401。
+- 對齊邏輯（`app/alignment.py`）採規格書 3.2 建議的「片段時間戳中點落入哪個說話者區段」規則，找不到重疊區段時退而求其次找最近的區段。
+- 說話者標籤正規化成 `Speaker 1`、`Speaker 2`...（依首次出現順序），不是 pyannote 原始的 `SPEAKER_00` 格式。
+
+### 音檔前處理：統一轉成 WAV
+- `app/audio_preprocess.py` 在跑 STT/diarization 前，一律先用 ffmpeg 把上傳的音檔（mp3/wav/m4a）轉成 16kHz mono WAV。
+- 原因：手機錄的 m4a 常有 AAC encoder padding，導致容器回報的時長跟實際解碼出來的取樣數對不上，會讓 pyannote 的 chunked reader 讀取失敗。統一轉檔可以避開這個問題，對兩個引擎都更穩定。
+- 這台機器上的 ffmpeg 是用 `winget install --id Gyan.FFmpeg.Shared` 裝的（需要「shared」版本才有 DLL，torchcodec 需要這些 DLL 才能載入）。`config.py` 會自動偵測 winget 安裝路徑並註冊 DLL 目錄（`os.add_dll_directory`），不依賴系統 PATH。
+
+### LLM：改用 Google Gemini API，非規格書原訂的 Claude API
+- **原因**：使用者評估 Claude API 需要信用卡加值，改選 Gemini API（免費額度不需綁信用卡，有速率限制但對這個系統的用量足夠）。
+- SDK：`google-genai`（`pip install google-genai`），用法 `from google import genai` → `client.interactions.create(model=..., input=...)`。
+- `.env` 對應變數：`GEMINI_API_KEY`、`GEMINI_MODEL`（預設 `gemini-3.6-flash`）。
+- `app/llm.py` 的函式名稱刻意保持通用（`generate_action_items`、`generate_summary`），如果之後要換回 Claude 或其他 LLM，只需要改這個檔案內部實作，不用動 `api/transcribe.py`。
+- Prompt 設計完全照規格書 4.2/4.3/4.4：ACTION_ITEMS 用「[負責人：X] 事項 (截止日期：Y)」格式 + Next Steps 條列；SUMMARY 依主題分段、每段小標題、3 分鐘可讀完；兩者一律輸出繁體中文，不受原始音檔語言影響。
+
+### docx 輸出：python-docx
+- VERBATIM：`[HH:MM:SS] Speaker N：文字`，逐段輸出，不經 LLM 加工（規格書 4.1）。
+- ACTION_ITEMS / SUMMARY：直接把 LLM 回傳的文字逐行寫成段落。
+
+### 資料儲存：檔案系統 JSON，沒有資料庫
+- 規格書建議 SQLite，但目前量小，先用檔案系統存 JSON（`data/audio/`、`data/transcripts/`、`data/outputs/`），比較簡單，之後真的需要查詢/索引效能時再考慮換資料庫。
+- **逐字稿 JSON schema**（對應規格書 3.4）：
+  ```json
+  {
+    "transcript_id": "uuid",
+    "audio_filename": "原始檔名",
+    "created_at": "ISO 8601",
+    "segments": [
+      {"start": 12.5, "end": 16.2, "speaker": "Speaker 1", "text": "..."}
+    ]
+  }
+  ```
+- **Output（ACTION_ITEMS/SUMMARY）JSON schema**（對應規格書第 5 節版本管理）：
+  ```json
+  {
+    "output_id": "uuid",
+    "transcript_id": "uuid",
+    "mode": "ACTION_ITEMS | SUMMARY",
+    "version": 1,
+    "created_at": "ISO 8601",
+    "content": "LLM 產出的純文字"
+  }
+  ```
+  每次觸發重新產生都會建立新的 output 檔案（新 uuid），版本號是同一個 (transcript_id, mode) 底下現有檔案數 +1，**不會覆蓋舊版本**。`storage.list_outputs(transcript_id)` 回傳該逐字稿底下所有版本，依 (mode, version) 排序。
+
+### Job 狀態：記憶體字典，重啟會消失，但不影響資料存取
+- `app/jobs.py` 的 pending/processing/done/failed 狀態只存在記憶體裡，伺服器重啟就會不見。
+- 但逐字稿 JSON 跟 outputs JSON 都在磁碟上，**重啟後不會消失**。所有需要「逐字稿已完成」的端點（`GET /transcripts/{id}`、VERBATIM 下載、產生 ACTION_ITEMS/SUMMARY）都改成**優先看磁碟上有沒有逐字稿檔案**，只有磁碟上也沒有時才去查記憶體中的 job 狀態（用來回報 pending/processing/failed 這種還沒寫檔的中間狀態）。共用邏輯在 `api/transcribe.py` 的 `_load_ready_transcript()`。
+- 歷史紀錄頁（`GET /api/transcripts`，`storage.list_transcripts()`）直接掃 `data/transcripts/*.json` 檔名列出所有逐字稿，不依賴 job 狀態，所以伺服器重啟、甚至換一台機器接手 `data/` 目錄，歷史紀錄都還在。
+
+### 歷史紀錄頁面
+- 前端首頁下方固定顯示「歷史紀錄」清單（`GET /api/transcripts`），依上傳時間新到舊排序，顯示檔名、上傳時間、逐字稿段數、已產生的 ACTION_ITEMS/SUMMARY 版本數。
+- 點清單項目會呼叫 `GET /api/transcripts/{id}`（同一支既有 API，包含 `transcript` + `outputs`），在同一頁的 `#result` 區塊渲染完整逐字稿跟所有版本輸出，不用另開頁面或路由。
+- 上傳新音檔完成、或產生新版本 ACTION_ITEMS/SUMMARY 之後，會自動重新呼叫 `loadHistory()` 刷新清單。
+
+## 環境需求（`.env`）
+
+```
+HF_TOKEN=...              # Hugging Face token，需已在 pyannote/speaker-diarization-community-1 頁面接受條款
+WHISPER_MODEL=medium      # 沒 GPU 先用 medium，有 GPU 環境可改 large-v3
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE_TYPE=int8
+GEMINI_API_KEY=...        # aistudio.google.com/api-keys 申請，免費額度不用信用卡
+GEMINI_MODEL=gemini-3.6-flash
+```
+
+系統層級還需要：
+- FFmpeg（shared/DLL 版本）：`winget install --id Gyan.FFmpeg.Shared -e`
+- Python 套件：見 `backend/requirements.txt`（含安裝順序註解，torch 要先裝 CPU 版才不會抓到幾 GB 的 CUDA 版）
+
+## 啟動指令
+
+```bash
+cd backend
+.venv/Scripts/python.exe -m uvicorn app.main:app --reload
+```
+
+## 規格書第 10 節已全部完成（第 1-7 項）
+
+### 第 7 項做了什麼
+- 前端新增真正的客戶端驗證（`static/index.html`）：上傳前先檢查副檔名（.mp3/.wav/.m4a），再用 `<audio>` 元素讀取 metadata 檢查時長 ≤ 2 小時，不符合直接擋下不送出，符合規格書 6 節「需做前端基本檔案格式與時長校驗」的要求。
+- 狀態文字改成中文（等待處理中／轉錄與說話者辨識中／完成／失敗），取代原本直接顯示英文 status 字串。
+- 用 in-app Browser 實際跑過一輪完整流程並截圖驗證：首頁載入 → 點歷史紀錄項目載入舊逐字稿（含 fallback 邏輯）→ 點「產生 Action Items」實際呼叫 Gemini 並顯示結果 → 下載連結存在且格式正確 → 歷史清單即時刷新。因為這個瀏覽環境沒辦法操作原生檔案選取對話框，上傳流程改用「在頁面 JS context 裡組出合法的 WAV Blob 當作 File 物件，直接呼叫 `handleFile()`」的方式測試，等同真實拖曳/選檔會觸發的同一段程式碼路徑，親眼確認 pending → processing → done 整個輪詢與畫面更新都正常。
+- 沒有發現需要修的 bug。
+
+至此規格書第 10 節列出的 7 個開發步驟全部完成，系統核心功能（上傳、STT、diarization、VERBATIM/ACTION_ITEMS/SUMMARY 三種輸出、版本管理、歷史紀錄）都已可用。之後若要繼續，可以考慮的方向：把前端排版/UX 再優化、把 job 狀態也做持久化（見上面「已知限制」段落）、或補上規格書沒明講但實務上會需要的東西（例如刪除逐字稿的功能、分頁）。

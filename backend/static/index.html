@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<title>逐字稿載入系統 — 上傳</title>
+<style>
+  body { font-family: system-ui, "Microsoft JhengHei", sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 1.4rem; }
+  #dropzone { border: 2px dashed #999; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; color: #666; }
+  #dropzone.drag { border-color: #333; color: #333; background: #f5f5f5; }
+  #status { margin-top: 20px; font-weight: bold; }
+  #error { margin-top: 12px; color: #b00020; }
+  .segment { margin-bottom: 8px; }
+  .ts { color: #888; margin-right: 8px; font-variant-numeric: tabular-nums; }
+  #result { margin-top: 24px; white-space: pre-wrap; }
+  input[type=file] { display: none; }
+  .download-link { display: inline-block; margin-bottom: 16px; padding: 8px 16px; background: #2c6ecb; color: #fff; text-decoration: none; border-radius: 4px; font-size: 0.9rem; }
+  .download-link:hover { background: #1f5aad; }
+  .generate-btn { display: inline-block; margin: 0 8px 16px 0; padding: 8px 16px; background: #fff; color: #2c6ecb; border: 1px solid #2c6ecb; border-radius: 4px; font-size: 0.9rem; cursor: pointer; }
+  .generate-btn:hover { background: #eef4fd; }
+  .generate-btn:disabled { opacity: 0.5; cursor: default; }
+  .output-card { margin-top: 16px; padding: 16px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; }
+  .output-card h3 { margin: 0 0 8px; font-size: 1rem; }
+  .output-content { white-space: pre-wrap; margin-bottom: 8px; }
+  h2.section-title { margin-top: 48px; padding-top: 16px; border-top: 1px solid #eee; font-size: 1.15rem; }
+  .history-item { padding: 10px 12px; border: 1px solid #eee; border-radius: 4px; margin-bottom: 8px; cursor: pointer; }
+  .history-item:hover { background: #f5f8ff; border-color: #cdddf7; }
+  .history-name { font-weight: bold; }
+  .history-meta { font-size: 0.85rem; color: #666; margin-top: 2px; }
+</style>
+</head>
+<body>
+  <h1>逐字稿載入系統 — 音檔上傳</h1>
+  <p style="color:#b00020">此系統為內部工具，請勿上傳機密內容。</p>
+
+  <div id="dropzone">
+    拖曳音檔到這裡，或點擊選擇檔案<br />
+    <small>支援 mp3 / wav / m4a，時長 2 小時以內</small>
+    <input type="file" id="fileInput" accept=".mp3,.wav,.m4a" />
+  </div>
+
+  <div id="status"></div>
+  <div id="error"></div>
+  <div id="result"></div>
+
+  <h2 class="section-title">歷史紀錄</h2>
+  <div id="history"></div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const statusEl = document.getElementById('status');
+const errorEl = document.getElementById('error');
+const resultEl = document.getElementById('result');
+const historyEl = document.getElementById('history');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('drag');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) handleFile(fileInput.files[0]);
+});
+
+function formatTime(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return [h, m, s].map((n) => String(n).padStart(2, '0')).join(':');
+}
+
+const ALLOWED_EXTENSIONS = ['.mp3', '.wav', '.m4a'];
+const MAX_DURATION_SECONDS = 2 * 60 * 60;
+
+function getExtension(filename) {
+  const idx = filename.lastIndexOf('.');
+  return idx === -1 ? '' : filename.slice(idx).toLowerCase();
+}
+
+// Reads duration via the browser's own audio decoder — no upload needed.
+// Resolves null (skip the check) if the browser can't decode the file client-side;
+// the backend still validates duration server-side either way.
+function readDuration(file) {
+  return new Promise((resolve) => {
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+    const url = URL.createObjectURL(file);
+    const cleanup = () => URL.revokeObjectURL(url);
+    audio.onloadedmetadata = () => {
+      cleanup();
+      resolve(Number.isFinite(audio.duration) ? audio.duration : null);
+    };
+    audio.onerror = () => {
+      cleanup();
+      resolve(null);
+    };
+    audio.src = url;
+  });
+}
+
+async function handleFile(file) {
+  errorEl.textContent = '';
+  resultEl.innerHTML = '';
+
+  const ext = getExtension(file.name);
+  if (!ALLOWED_EXTENSIONS.includes(ext)) {
+    errorEl.textContent = `不支援的檔案格式：${ext || '（無副檔名）'}，僅接受 mp3/wav/m4a`;
+    return;
+  }
+
+  statusEl.textContent = '檢查音檔時長中…';
+  const duration = await readDuration(file);
+  if (duration !== null && duration > MAX_DURATION_SECONDS) {
+    statusEl.textContent = '';
+    errorEl.textContent = `音檔時長約 ${Math.round(duration / 60)} 分鐘，超過 2 小時上限`;
+    return;
+  }
+
+  statusEl.textContent = '上傳中…';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  let res;
+  try {
+    res = await fetch('/api/upload', { method: 'POST', body: formData });
+  } catch (e) {
+    statusEl.textContent = '';
+    errorEl.textContent = '上傳失敗：無法連線到伺服器';
+    return;
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    statusEl.textContent = '';
+    errorEl.textContent = '上傳失敗：' + (err.detail || res.statusText);
+    return;
+  }
+
+  const data = await res.json();
+  statusEl.textContent = STATUS_LABELS[data.status] || data.status;
+  pollStatus(data.transcript_id);
+}
+
+const STATUS_LABELS = {
+  pending: '狀態：等待處理中…',
+  processing: '狀態：轉錄與說話者辨識中…（可能需要幾分鐘）',
+  done: '狀態：完成',
+  failed: '狀態：失敗',
+};
+
+async function pollStatus(transcriptId) {
+  const res = await fetch(`/api/transcripts/${transcriptId}`);
+  if (!res.ok) {
+    errorEl.textContent = '查詢狀態失敗';
+    return;
+  }
+  const data = await res.json();
+  statusEl.textContent = STATUS_LABELS[data.status] || data.status;
+
+  if (data.status === 'pending' || data.status === 'processing') {
+    setTimeout(() => pollStatus(transcriptId), 2000);
+    return;
+  }
+
+  if (data.status === 'failed') {
+    errorEl.textContent = '轉錄失敗：' + (data.error || '未知錯誤');
+    return;
+  }
+
+  if (data.status === 'done') {
+    renderTranscript(data.transcript, data.outputs || []);
+    loadHistory();
+  }
+}
+
+function formatDateTime(iso) {
+  return new Date(iso).toLocaleString('zh-TW', { hour12: false });
+}
+
+async function loadHistory() {
+  let res;
+  try {
+    res = await fetch('/api/transcripts');
+  } catch (e) {
+    historyEl.textContent = '無法載入歷史紀錄';
+    return;
+  }
+  if (!res.ok) {
+    historyEl.textContent = '無法載入歷史紀錄';
+    return;
+  }
+
+  const list = await res.json();
+  historyEl.innerHTML = '';
+
+  if (list.length === 0) {
+    historyEl.textContent = '尚無歷史紀錄';
+    return;
+  }
+
+  for (const item of list) {
+    const div = document.createElement('div');
+    div.className = 'history-item';
+    div.onclick = () => viewTranscript(item.transcript_id);
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'history-name';
+    nameEl.textContent = item.audio_filename;
+    div.appendChild(nameEl);
+
+    const outputsSummary = Object.entries(item.output_counts)
+      .map(([mode, count]) => `${OUTPUT_LABELS[mode]} x${count}`)
+      .join('、');
+    const metaEl = document.createElement('div');
+    metaEl.className = 'history-meta';
+    metaEl.textContent = `${formatDateTime(item.created_at)}・共 ${item.segment_count} 段`
+      + (outputsSummary ? `・${outputsSummary}` : '');
+    div.appendChild(metaEl);
+
+    historyEl.appendChild(div);
+  }
+}
+
+async function viewTranscript(transcriptId) {
+  errorEl.textContent = '';
+  statusEl.textContent = '載入中…';
+
+  let res;
+  try {
+    res = await fetch(`/api/transcripts/${transcriptId}`);
+  } catch (e) {
+    statusEl.textContent = '';
+    errorEl.textContent = '載入逐字稿失敗：無法連線到伺服器';
+    return;
+  }
+  if (!res.ok) {
+    statusEl.textContent = '';
+    errorEl.textContent = '載入逐字稿失敗';
+    return;
+  }
+
+  const data = await res.json();
+  statusEl.textContent = '';
+  renderTranscript(data.transcript, data.outputs || []);
+  resultEl.scrollIntoView({ behavior: 'smooth' });
+}
+
+function renderTranscript(transcript, outputs) {
+  resultEl.innerHTML = '';
+  const title = document.createElement('h2');
+  title.textContent = transcript.audio_filename;
+  resultEl.appendChild(title);
+
+  const downloadLink = document.createElement('a');
+  downloadLink.className = 'download-link';
+  downloadLink.href = `/api/transcripts/${transcript.transcript_id}/verbatim.docx`;
+  downloadLink.textContent = '下載逐字稿（.docx）';
+  resultEl.appendChild(downloadLink);
+  resultEl.appendChild(document.createElement('br'));
+
+  const actionItemsBtn = document.createElement('button');
+  actionItemsBtn.className = 'generate-btn';
+  actionItemsBtn.textContent = '產生 Action Items';
+  actionItemsBtn.onclick = () => generateOutput(transcript.transcript_id, 'ACTION_ITEMS', actionItemsBtn);
+  resultEl.appendChild(actionItemsBtn);
+
+  const summaryBtn = document.createElement('button');
+  summaryBtn.className = 'generate-btn';
+  summaryBtn.textContent = '產生會議摘要';
+  summaryBtn.onclick = () => generateOutput(transcript.transcript_id, 'SUMMARY', summaryBtn);
+  resultEl.appendChild(summaryBtn);
+
+  const outputsEl = document.createElement('div');
+  outputsEl.id = 'outputs';
+  resultEl.appendChild(outputsEl);
+
+  // Existing versions (persisted on disk) load in mode/version order —
+  // this is what keeps history visible across page reloads / server restarts.
+  for (const output of outputs) {
+    outputsEl.appendChild(renderOutputCard(transcript.transcript_id, output));
+  }
+
+  for (const seg of transcript.segments) {
+    const div = document.createElement('div');
+    div.className = 'segment';
+    const ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = `[${formatTime(seg.start)}]`;
+    div.appendChild(ts);
+    const label = seg.speaker ? `${seg.speaker}：` : '';
+    div.appendChild(document.createTextNode(label + seg.text));
+    resultEl.appendChild(div);
+  }
+}
+
+const OUTPUT_LABELS = { ACTION_ITEMS: 'Action Items', SUMMARY: '會議摘要' };
+
+function renderOutputCard(transcriptId, output) {
+  const card = document.createElement('div');
+  card.className = 'output-card';
+
+  const heading = document.createElement('h3');
+  heading.textContent = `${OUTPUT_LABELS[output.mode]}（第 ${output.version} 版）`;
+  card.appendChild(heading);
+
+  const content = document.createElement('div');
+  content.className = 'output-content';
+  content.textContent = output.content;
+  card.appendChild(content);
+
+  const dl = document.createElement('a');
+  dl.className = 'download-link';
+  dl.href = `/api/transcripts/${transcriptId}/outputs/${output.output_id}/download.docx`;
+  dl.textContent = '下載（.docx）';
+  card.appendChild(dl);
+
+  return card;
+}
+
+async function generateOutput(transcriptId, mode, button) {
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = '產生中…';
+
+  let res;
+  try {
+    res = await fetch(`/api/transcripts/${transcriptId}/outputs?mode=${mode}`, { method: 'POST' });
+  } catch (e) {
+    errorEl.textContent = `產生${OUTPUT_LABELS[mode]}失敗：無法連線到伺服器`;
+    button.disabled = false;
+    button.textContent = originalText;
+    return;
+  }
+
+  button.disabled = false;
+  button.textContent = originalText;
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    errorEl.textContent = `產生${OUTPUT_LABELS[mode]}失敗：` + (err.detail || res.statusText);
+    return;
+  }
+
+  const output = await res.json();
+  const outputsEl = document.getElementById('outputs');
+  outputsEl.prepend(renderOutputCard(transcriptId, output));
+  loadHistory();
+}
+
+loadHistory();
+</script>
+</body>
+</html>
