@@ -143,3 +143,30 @@ cd backend
 - 沒有發現需要修的 bug。
 
 至此規格書第 10 節列出的 7 個開發步驟全部完成，系統核心功能（上傳、STT、diarization、VERBATIM/ACTION_ITEMS/SUMMARY 三種輸出、版本管理、歷史紀錄）都已可用。之後若要繼續，可以考慮的方向：把前端排版/UX 再優化、把 job 狀態也做持久化（見上面「已知限制」段落）、或補上規格書沒明講但實務上會需要的東西（例如刪除逐字稿的功能、分頁）。
+
+## 效能優化
+
+同一份 22 秒測試音檔的處理時間從 ~50-55 秒降到 **~38 秒**，三項都不犧牲輸出品質：
+
+1. **VAD filter**（`app/stt/faster_whisper_engine.py`）：`model.transcribe(audio_path, vad_filter=True)`，先跳過靜音再送進模型，會議錄音常有停頓，省下不少時間。
+2. **明確設定 CPU 執行緒數**：這台機器 12 核，`.env` 新增 `WHISPER_CPU_THREADS`（預設 8）、`DIARIZATION_CPU_THREADS`（預設 4）——因為 STT 跟 diarization 現在平行跑（見下一點），兩者分配核心數避免互搶，換到別的機器要照核心數調整。faster-whisper 走 ctranslate2 自己的執行緒池（`WhisperModel(cpu_threads=...)`），pyannote 走 torch 的（`torch.set_num_threads(...)`），兩者互不影響。
+3. **STT 跟 diarization 平行跑**（`api/transcribe.py` 的 `_run_transcription`）：兩者互不依賴（都只需要那份轉檔後的 WAV），改用 `ThreadPoolExecutor` 同時送出去跑，總時間接近「兩者中較慢的那個」而不是「兩者相加」。兩個引擎都會在計算時釋放 GIL（ctranslate2 是原生 C++、torch 也是），所以純 thread（不用 multiprocessing）就能拿到真正的平行效果。
+
+還沒做、如果之後真的需要更快可以考慮：`WHISPER_MODEL` 降級（medium→small，準確度會下降，尤其中英夾雜）、GPU（本地或雲端，效果最大但要硬體/預算）、換成付費雲端 STT API（`STTEngine` 抽象層本來就是為了這個）。
+
+## 部署（Cloudflare Tunnel + GitHub）
+
+**現況**：公開網址透過 Cloudflare Quick Tunnel 對外，跑在使用者自己這台 Windows 機器上（沒有租用任何雲端主機——免費雲端方案的 RAM 通常撐不住 torch + faster-whisper + pyannote 這套疊層，所以選擇用自己已經驗證跑得動的機器）。
+
+- **權限模型維持規格書原案**：無登入、公開、不分使用者（預期使用者 <5 人，內部快速上線優先於做帳號系統）。
+- **Cloudflare Tunnel**：`winget install --id Cloudflare.cloudflared`，用 Quick Tunnel（`cloudflared tunnel --url http://localhost:8000`），不需要 Cloudflare 帳號、不需要網域。
+  - ⚠️ **網址不固定**：Quick Tunnel 每次重啟都會換一個新的 `*.trycloudflare.com` 隨機網址，重開機或 tunnel process 重啟後網址會變。要固定網址需要使用者自己買網域、綁到 Cloudflare、改用「named tunnel」（需要 `cloudflared tunnel login` 走一次帳號綁定），目前沒做。
+  - 目前網址查詢方式：跑 `backend/get_tunnel_url.ps1`，會從 `backend/logs/tunnel.log` 抓最新的網址。
+- **開機自動啟動**：這個 sandbox 環境對 Task Scheduler（`schtasks`/`Register-ScheduledTask`）沒有權限（Access Denied），改用**傳統 Windows 啟動資料夾**：
+  - `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\start_server.vbs`
+  - `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\start_tunnel.vbs`
+  - 這兩個 `.vbs` 用 `WScript.Shell.Run` 隱藏視窗啟動對應的 `backend/start_server.ps1` / `backend/start_tunnel.ps1`。
+  - **編碼是這裡的坑**：路徑含中文（`桌面`、`會議記錄系統`），經典 VBScript（`cscript`/`wscript`）預設用系統 ANSI codepage 讀檔，UTF-8 BOM 也不行（會被當亂碼，編譯期直接報「無效的字元」）——**要用 UTF-16LE + BOM**（PowerShell `Set-Content -Encoding Unicode`）VBScript 才讀得對中文路徑。如果之後要改這兩個 `.vbs`，記得維持這個編碼，不要用一般文字編輯器存成 UTF-8 覆蓋掉。
+  - `start_server.ps1` 沒加 `--reload`（正式執行不需要熱重載），`start_tunnel.ps1` 有內建 8 秒延遲，確保先等 server 起來再連。
+  - 這個機制只有在**真的登入 Windows** 時才會觸發，沒辦法在這個 sandbox 裡直接驗證「登入時真的會跑」，但用 `cscript` 手動跑過一次確認整個路徑解析跟啟動鏈是通的（會正確印出 port 8000 已被佔用的錯誤，證明程式碼跟路徑都對，只是因為手動啟動的伺服器已經佔住那個 port）。
+- **GitHub**：程式碼在 https://github.com/Ines81811/meeting-minutes（`main` branch，public）。`.gitignore` 排除 `.env`、`data/audio|transcripts|outputs/*`、`.venv/`、`logs/`——只有程式碼上去，音檔/逐字稿/API 金鑰都留在本機。目前只是單純的程式碼備份，還沒接 CI/CD 自動部署（因為部署方式是「本機常駐服務」，不是典型的 push-to-deploy 平台）。
