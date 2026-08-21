@@ -170,3 +170,17 @@ cd backend
   - `start_server.ps1` 沒加 `--reload`（正式執行不需要熱重載），`start_tunnel.ps1` 有內建 8 秒延遲，確保先等 server 起來再連。
   - 這個機制只有在**真的登入 Windows** 時才會觸發，沒辦法在這個 sandbox 裡直接驗證「登入時真的會跑」，但用 `cscript` 手動跑過一次確認整個路徑解析跟啟動鏈是通的（會正確印出 port 8000 已被佔用的錯誤，證明程式碼跟路徑都對，只是因為手動啟動的伺服器已經佔住那個 port）。
 - **GitHub**：程式碼在 https://github.com/Ines81811/meeting-minutes（`main` branch，public）。`.gitignore` 排除 `.env`、`data/audio|transcripts|outputs/*`、`.venv/`、`logs/`——只有程式碼上去，音檔/逐字稿/API 金鑰都留在本機。目前只是單純的程式碼備份，還沒接 CI/CD 自動部署（因為部署方式是「本機常駐服務」，不是典型的 push-to-deploy 平台）。
+
+### 已知的營運狀況（實際發生過，不是理論上的風險）
+
+- **Quick Tunnel 真的斷過一次**：cloudflared process 還活著、沒當掉，但邊緣連線斷了，網址變成連不上（`curl` 回 `HTTP 000`）。這印證了 Cloudflare 官方文件寫的「quick tunnel 沒有 uptime 保證」不是講假的。處理方式：把舊 process `taskkill /F` 掉，重新跑一次 `cloudflared tunnel --url http://localhost:8000`，會拿到一組新網址（新舊網址完全無關，不是同一個 tunnel 復活）。
+- **這個 Claude Code sandbox／對話 session 重啟，會把背景跑的 server + tunnel process 一起帶走**：不是「斷線」，是**process 直接消失**（`tasklist` 查不到）。開機資料夾（`Startup\*.vbs`）那組**不會**因為這種重啟而觸發——它只在**真的登入 Windows** 時才會執行，sandbox/session 重啟不算登入。所以每次接續一個新的 Claude session 時，第一件事應該是先檢查 `http://127.0.0.1:8000/` 跟 tunnel 網址是否還活著，兩個都可能需要手動重開：
+  ```bash
+  # server（背景執行，冷啟動約 15-25 秒——torch/pyannote import 需要時間，第一次 curl 可能還是 000，等一下再試）
+  cd backend && ./.venv/Scripts/python.exe -m uvicorn app.main:app --port 8000
+
+  # tunnel（背景執行，從輸出 log 抓新網址）
+  "/c/Program Files (x86)/cloudflared/cloudflared.exe" tunnel --url http://localhost:8000
+  ```
+- **目前的公開網址不要寫死在這份文件裡**——因為上面兩點，網址會一直換，寫了也會馬上過期。要拿目前的網址，用上面的指令重新啟動一次最準。
+- 這些狀況（服務會斷、網址會變、需要人手動重啟）正是「先上免費方案、以後再看要不要花錢」這個決策帶來的直接後果，已經在跟老闆的匯報裡講清楚了。真的要解決，還是要嘛買網域＋named tunnel（網址不再變），要嘛換成真正的常駐主機（不依賴這台開發機、不依賴這個 Claude session）。
