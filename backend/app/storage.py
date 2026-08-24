@@ -90,12 +90,13 @@ def _next_output_version(transcript_id: str, mode: str) -> int:
     return len(list_outputs(transcript_id, mode)) + 1
 
 
-def save_output(transcript_id: str, mode: str, content: str) -> dict:
+def save_output(transcript_id: str, mode: str, content: str, style: str | None = None) -> dict:
     output_id = str(uuid.uuid4())
     data = {
         "output_id": output_id,
         "transcript_id": transcript_id,
         "mode": mode,
+        "style": style,
         "version": _next_output_version(transcript_id, mode),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "content": content,

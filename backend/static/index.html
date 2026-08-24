@@ -19,6 +19,7 @@
   .generate-btn { display: inline-block; margin: 0 8px 16px 0; padding: 8px 16px; background: #fff; color: #2c6ecb; border: 1px solid #2c6ecb; border-radius: 4px; font-size: 0.9rem; cursor: pointer; }
   .generate-btn:hover { background: #eef4fd; }
   .generate-btn:disabled { opacity: 0.5; cursor: default; }
+  .style-select { margin: 0 8px 16px 0; padding: 7px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; }
   .output-card { margin-top: 16px; padding: 16px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; }
   .output-card h3 { margin: 0 0 8px; font-size: 1rem; }
   .output-content { margin-bottom: 8px; }
@@ -277,10 +278,20 @@ function renderTranscript(transcript, outputs) {
   actionItemsBtn.onclick = () => generateOutput(transcript.transcript_id, 'ACTION_ITEMS', actionItemsBtn);
   resultEl.appendChild(actionItemsBtn);
 
+  const styleSelect = document.createElement('select');
+  styleSelect.className = 'style-select';
+  for (const [value, label] of Object.entries(STYLE_LABELS)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    styleSelect.appendChild(option);
+  }
+  resultEl.appendChild(styleSelect);
+
   const summaryBtn = document.createElement('button');
   summaryBtn.className = 'generate-btn';
   summaryBtn.textContent = '產生會議摘要';
-  summaryBtn.onclick = () => generateOutput(transcript.transcript_id, 'SUMMARY', summaryBtn);
+  summaryBtn.onclick = () => generateOutput(transcript.transcript_id, 'SUMMARY', summaryBtn, styleSelect.value);
   resultEl.appendChild(summaryBtn);
 
   const outputsEl = document.createElement('div');
@@ -307,6 +318,17 @@ function renderTranscript(transcript, outputs) {
 }
 
 const OUTPUT_LABELS = { ACTION_ITEMS: 'Action Items', SUMMARY: '會議摘要' };
+
+// Mirrors app/llm.py's SUMMARY_STYLES keys/labels. "auto" is the default
+// pre-selected option, and also what missing/unrecognized `style` values
+// (e.g. SUMMARY outputs generated before this feature existed) fall back to.
+const STYLE_LABELS = {
+  auto: '自動判斷',
+  data: '數據報告型',
+  decision: '決策討論型',
+  interview: '訪談型',
+  comparison: '方案比較型',
+};
 
 // Renders the constrained Markdown subset produced by SUMMARY_PROMPT
 // (see app/llm.py): #/## headings, -/  - bullets (two levels), **bold**.
@@ -355,7 +377,10 @@ function renderOutputCard(transcriptId, output) {
   card.className = 'output-card';
 
   const heading = document.createElement('h3');
-  heading.textContent = `${OUTPUT_LABELS[output.mode]}（第 ${output.version} 版）`;
+  const styleTag = output.mode === 'SUMMARY'
+    ? `・${STYLE_LABELS[output.style] || STYLE_LABELS.auto}`
+    : '';
+  heading.textContent = `${OUTPUT_LABELS[output.mode]}${styleTag}（第 ${output.version} 版）`;
   card.appendChild(heading);
 
   const content = document.createElement('div');
@@ -372,14 +397,17 @@ function renderOutputCard(transcriptId, output) {
   return card;
 }
 
-async function generateOutput(transcriptId, mode, button) {
+async function generateOutput(transcriptId, mode, button, style) {
   button.disabled = true;
   const originalText = button.textContent;
   button.textContent = '產生中…';
 
+  const query = new URLSearchParams({ mode });
+  if (mode === 'SUMMARY') query.set('style', style || 'auto');
+
   let res;
   try {
-    res = await fetch(`/api/transcripts/${transcriptId}/outputs?mode=${mode}`, { method: 'POST' });
+    res = await fetch(`/api/transcripts/${transcriptId}/outputs?${query}`, { method: 'POST' });
   } catch (e) {
     errorEl.textContent = `產生${OUTPUT_LABELS[mode]}失敗：無法連線到伺服器`;
     button.disabled = false;

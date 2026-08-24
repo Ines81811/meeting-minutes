@@ -136,9 +136,16 @@ def download_verbatim(transcript_id: str):
 
 
 @router.post("/transcripts/{transcript_id}/outputs")
-def create_output(transcript_id: str, mode: str):
+def create_output(transcript_id: str, mode: str, style: str = "auto"):
     if mode not in OUTPUT_MODE_LABELS:
         raise HTTPException(status_code=400, detail="mode 必須是 ACTION_ITEMS 或 SUMMARY")
+
+    # style only applies to SUMMARY — ACTION_ITEMS ignores it entirely.
+    if mode == "SUMMARY" and style not in llm.SUMMARY_STYLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"style 必須是以下之一：{', '.join(llm.SUMMARY_STYLES)}",
+        )
 
     transcript = _load_ready_transcript(transcript_id)
     transcript_text = llm.build_transcript_text(transcript)
@@ -146,12 +153,14 @@ def create_output(transcript_id: str, mode: str):
     try:
         if mode == "ACTION_ITEMS":
             content = llm.generate_action_items(transcript_text)
+            output_style = None
         else:
-            content = llm.generate_summary(transcript_text)
+            content = llm.generate_summary(transcript_text, style=style)
+            output_style = style
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"呼叫 Gemini API 失敗：{exc}")
 
-    return storage.save_output(transcript_id, mode, content)
+    return storage.save_output(transcript_id, mode, content, style=output_style)
 
 
 @router.get("/transcripts/{transcript_id}/outputs/{output_id}/download.docx")
@@ -162,6 +171,9 @@ def download_output(transcript_id: str, output_id: str):
 
     transcript = storage.load_transcript_json(transcript_id)
     label = OUTPUT_MODE_LABELS[output["mode"]]
+    style_key = output.get("style")
+    if style_key and style_key in llm.SUMMARY_STYLES:
+        label = f"{label}-{llm.SUMMARY_STYLES[style_key]['label']}"
     buffer = build_output_docx(f"{label}（v{output['version']}）", output["content"])
 
     base_name = Path(transcript["audio_filename"]).stem
