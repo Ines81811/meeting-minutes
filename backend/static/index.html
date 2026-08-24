@@ -21,7 +21,15 @@
   .generate-btn:disabled { opacity: 0.5; cursor: default; }
   .output-card { margin-top: 16px; padding: 16px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; }
   .output-card h3 { margin: 0 0 8px; font-size: 1rem; }
-  .output-content { white-space: pre-wrap; margin-bottom: 8px; }
+  .output-content { margin-bottom: 8px; }
+  .output-content h2 { font-size: 1.05rem; margin: 16px 0 6px; }
+  .output-content h2:first-child { margin-top: 0; }
+  .output-content h3 { font-size: 0.95rem; margin: 12px 0 4px; }
+  .output-content p { margin: 4px 0; }
+  .output-content .md-bullet { position: relative; margin: 4px 0; padding-left: 18px; }
+  .output-content .md-bullet::before { content: "•"; position: absolute; left: 2px; color: #888; }
+  .output-content .md-bullet-2 { margin-left: 20px; }
+  .output-content .md-bullet-2::before { content: "◦"; }
   h2.section-title { margin-top: 48px; padding-top: 16px; border-top: 1px solid #eee; font-size: 1.15rem; }
   .history-item { padding: 10px 12px; border: 1px solid #eee; border-radius: 4px; margin-bottom: 8px; cursor: pointer; }
   .history-item:hover { background: #f5f8ff; border-color: #cdddf7; }
@@ -300,6 +308,48 @@ function renderTranscript(transcript, outputs) {
 
 const OUTPUT_LABELS = { ACTION_ITEMS: 'Action Items', SUMMARY: '會議摘要' };
 
+// Renders the constrained Markdown subset produced by SUMMARY_PROMPT
+// (see app/llm.py): #/## headings, -/  - bullets (two levels), **bold**.
+// ACTION_ITEMS content doesn't use this syntax, so its lines just fall
+// through to plain <p> paragraphs, same as before.
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function renderInlineMarkdown(text) {
+  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
+function renderMarkdown(content) {
+  const html = [];
+  for (const raw of content.split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim()) continue;
+
+    if (line.startsWith('## ')) {
+      html.push(`<h3>${renderInlineMarkdown(line.slice(3).trim())}</h3>`);
+      continue;
+    }
+    if (line.startsWith('# ')) {
+      html.push(`<h2>${renderInlineMarkdown(line.slice(2).trim())}</h2>`);
+      continue;
+    }
+
+    const stripped = line.replace(/^ +/, '');
+    const indent = line.length - stripped.length;
+    if (stripped.startsWith('- ')) {
+      const cls = indent >= 2 ? 'md-bullet md-bullet-2' : 'md-bullet';
+      html.push(`<div class="${cls}">${renderInlineMarkdown(stripped.slice(2).trim())}</div>`);
+      continue;
+    }
+
+    html.push(`<p>${renderInlineMarkdown(line)}</p>`);
+  }
+  return html.join('');
+}
+
 function renderOutputCard(transcriptId, output) {
   const card = document.createElement('div');
   card.className = 'output-card';
@@ -310,7 +360,7 @@ function renderOutputCard(transcriptId, output) {
 
   const content = document.createElement('div');
   content.className = 'output-content';
-  content.textContent = output.content;
+  content.innerHTML = renderMarkdown(output.content);
   card.appendChild(content);
 
   const dl = document.createElement('a');
